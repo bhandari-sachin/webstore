@@ -31,7 +31,7 @@ A Java Spring Boot backend for the **Database Solutions** course. The project us
 - JDK 21
 - Git
 - Docker with Docker Compose (Docker Desktop with WSL2 integration is suitable on Windows)
-- A copy of the course-provided `../../Downloads/To_File/schema_populated_dump.sql`
+- A copy of the course-provided `schema_populated_dump.sql`
 
 The Spring Boot project runs on Windows or WSL; MariaDB runs in Docker. The example configuration below assumes the database is published to `127.0.0.1:3307` on the host. Change the port if your actual Compose configuration differs.
 
