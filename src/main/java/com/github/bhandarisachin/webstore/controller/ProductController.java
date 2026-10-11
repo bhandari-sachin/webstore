@@ -6,17 +6,24 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import com.github.bhandarisachin.webstore.dto.ProductRequest;
 import org.springframework.http.HttpStatus;
+import com.github.bhandarisachin.webstore.entity.ProductPriceHistory;
+import com.github.bhandarisachin.webstore.service.ProductPriceHistoryService;
 
 import java.util.List;
 
 @RestController
 @RequestMapping("/api/products")
 public class ProductController {
+    private final ProductPriceHistoryService priceHistoryService;
 
     private final ProductService service;
 
-    public ProductController(ProductService service) {
-        this.service = service;
+    public ProductController(
+            ProductService productService,
+            ProductPriceHistoryService priceHistoryService) {
+
+        this.service = productService;
+        this.priceHistoryService = priceHistoryService;
     }
 
     @GetMapping
@@ -67,4 +74,13 @@ public class ProductController {
 
         return ResponseEntity.noContent().build();
     }
+
+
+    @GetMapping("/{id}/price-history")
+    public List<ProductPriceHistory> getProductPriceHistory(
+            @PathVariable Integer id) {
+
+        return priceHistoryService.getPriceHistory(id);
+    }
+
 }

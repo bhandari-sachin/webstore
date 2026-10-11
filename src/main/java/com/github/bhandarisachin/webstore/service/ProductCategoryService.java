@@ -3,6 +3,7 @@ package com.github.bhandarisachin.webstore.service;
 import com.github.bhandarisachin.webstore.entity.ProductCategory;
 import com.github.bhandarisachin.webstore.repository.ProductCategoryRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.Optional;
@@ -46,6 +47,17 @@ public class ProductCategoryService {
 
         repository.deleteById(id);
         return true;
+    }
+
+    @Transactional(readOnly = true)
+    public int getProductCount(Integer categoryId) {
+
+        ProductCategory category = repository.findById(categoryId)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Category not found: " + categoryId
+                ));
+
+        return category.getProducts().size();
     }
 
 }

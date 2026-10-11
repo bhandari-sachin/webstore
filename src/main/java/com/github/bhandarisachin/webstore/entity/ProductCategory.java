@@ -1,6 +1,10 @@
+
 package com.github.bhandarisachin.webstore.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.persistence.*;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "productcategories")
@@ -15,6 +19,11 @@ public class ProductCategory {
 
     @Column(columnDefinition = "TEXT")
     private String description;
+
+    // One category can have many products
+    @JsonIgnore
+    @OneToMany(mappedBy = "category", fetch = FetchType.LAZY)
+    private List<Product> products = new ArrayList<>();
 
     public ProductCategory() {
     }
@@ -41,5 +50,9 @@ public class ProductCategory {
 
     public void setDescription(String description) {
         this.description = description;
+    }
+
+    public List<Product> getProducts() {
+        return products;
     }
 }

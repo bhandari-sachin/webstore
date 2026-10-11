@@ -72,4 +72,15 @@ public class ProductCategoryController {
 
         return ResponseEntity.noContent().build();
     }
+
+    @GetMapping("/{id}/product-count")
+    public ResponseEntity<Integer> getProductCount(
+            @PathVariable Integer id) {
+
+        if (service.getCategoryById(id).isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+
+        return ResponseEntity.ok(service.getProductCount(id));
+    }
 }
