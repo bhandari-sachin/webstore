@@ -1,100 +1,130 @@
 # Webstore Management REST API
 
-A Java Spring Boot backend for the **Database Solutions** course. The project uses the course-provided relational Webstore schema in MariaDB and is being developed incrementally into a small webshop/order-management service.
+A Java Spring Boot backend for the **Database Solutions** course, built around the course-provided relational `webstore` schema in MariaDB. The project implements product and category management, customer lookup/creation, transactional order placement, catalog reporting, and product price-change history.
 
-> **Project status:** Work in progress. Product and product-category CRUD are implemented and have been manually tested. Customer and order management and the database-focused course features are still to be developed or verified.
+> **Status:** Functional coursework prototype. The endpoints and database features described below have been developed and manually exercised during the project. Automated integration tests, complete input validation, least-privilege database permissions, and backup/restore verification remain outstanding. Do not treat this as a production-ready webshop.
 
 ## Technology stack
 
-- Java 21
-- Spring Boot 4.1.1 / Spring Web MVC
-- Spring Data JPA (Hibernate)
-- MariaDB 11.4 (Docker)
-- Maven Wrapper
-- Git / GitHub
+- Java 21; Spring Boot 4.1.1; Spring Web MVC
+- Spring Data JPA / Hibernate
+- MariaDB 11.4 running in Docker
+- Maven Wrapper; Git / GitHub
 
-## Current functionality
+## Features at a glance
 
-- CRUD endpoints for product categories and products.
-- Controller → Service → Repository layering with constructor dependency injection.
-- JPA mapping of `productcategories` and `products`, including a `Product` → `ProductCategory` many-to-one association (lazy loaded).
-- Request/response DTOs for products; the product response includes category ID and name.
-- Lookup by ID with `404 Not Found` when no record exists.
-- Product creation checks that a supplied category ID exists.
-- Centralized handling of invalid arguments (`400 Bad Request`) and database-integrity violations (`409 Conflict`).
-- Product deletion respects foreign-key constraints, including references from `orderitems`.
-
-**Known limitations:** Product input does not yet have complete field validation, supplier IDs are not yet validated in the service, the category API currently exposes JPA entities directly, and product/category delete conflicts have only generic error responses. These are not production-ready APIs and do not include authentication.
+- Product and category CRUD, plus category product counts.
+- Customer listing, lookup, and creation.
+- Order listing, lookup, and **transactional creation** with multiple order items.
+- Quantity and duplicate-product validation, stock availability checks, and pessimistic product-row locks during order creation.
+- Product catalog view (`product_catalog_view`) exposed through read-only REST endpoints.
+- Price-search index (`idx_products_price`) with `EXPLAIN` comparison.
+- Price-history table and trigger that records changes to `products.price`, with a read-only history endpoint.
+- API error handling for invalid arguments (`400`) and foreign-key/integrity conflicts (`409`) in the established service paths.
 
 ## Prerequisites
 
 - JDK 21
 - Git
 - Docker with Docker Compose (Docker Desktop with WSL2 integration is suitable on Windows)
-- A copy of the course-provided `schema_populated_dump.sql`
+- The course-provided `schema_populated_dump.sql`
 
-The Spring Boot project runs on Windows or WSL; MariaDB runs in Docker. The example configuration below assumes the database is published to `127.0.0.1:3307` on the host. Change the port if your actual Compose configuration differs.
+The examples assume MariaDB is published on **host port 3307** and Spring Boot on **8080**.
 
 ## Database setup
 
-The project uses the **course-provided schema** rather than generating new tables automatically.
+The application uses the course-provided schema. Hibernate validates mappings rather than generating tables.
 
-1. Place `schema_populated_dump.sql` alongside your `compose.yaml` in the database setup directory. Review the dump before importing: check for `CREATE DATABASE`, `USE`, and destructive SQL statements.
-2. Configure the Compose service to use MariaDB 11.4, the `webstore` database, a named volume, and an initialization mount such as:
+### 1. Start MariaDB and import the provided schema
 
-   ```yaml
-   services:
-     database:
-       image: mariadb:11.4
-       container_name: webstore-mariadb
-       restart: unless-stopped
-       environment:
-         MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
-         MARIADB_DATABASE: webstore
-         MARIADB_USER: webstore_app
-         MARIADB_PASSWORD: ${DB_PASSWORD}
-       ports:
-         - "127.0.0.1:3307:3306"
-       volumes:
-         - webstore-data:/var/lib/mysql
-         - ./schema_populated_dump.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-       command:
-         - --event-scheduler=ON
-       healthcheck:
-         test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-         interval: 5s
-         timeout: 5s
-         retries: 10
-         start_period: 30s
-   volumes:
-     webstore-data:
-   ```
+Place `schema_populated_dump.sql` alongside your database `compose.yaml`. Review the dump for `CREATE DATABASE`, `USE`, or destructive SQL before importing it. An example Compose configuration follows:
 
-3. In that same directory, create an **untracked** `.env` file defining `DB_ROOT_PASSWORD` and `DB_PASSWORD`, with passwords of your choosing. Add `.env` to `.gitignore`.
-4. Start the database:
+```yaml
+services:
+  database:
+    image: mariadb:11.4
+    container_name: webstore-mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: webstore
+      MARIADB_USER: webstore_app
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - webstore-data:/var/lib/mysql
+      - ./schema_populated_dump.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    command:
+      - --event-scheduler=ON
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+volumes:
+  webstore-data:
+```
 
-   ```bash
-   docker compose up -d
-   docker compose ps
-   ```
+Create an **untracked** `.env` file in the Compose directory containing `DB_ROOT_PASSWORD` and `DB_PASSWORD`. Ensure `.env` is ignored by Git. Then run:
 
-5. Inspect the imported data:
+```bash
+docker compose up -d
+docker compose ps
+```
 
-   ```bash
-   docker exec -it webstore-mariadb mariadb -u webstore_app -p webstore
-   ```
+Connect to inspect the imported schema:
 
-   ```sql
-   SHOW TABLES;
-   SELECT * FROM products LIMIT 5;
-   DESCRIBE products;
-   ```
+```bash
+docker exec -it webstore-mariadb mariadb -u webstore_app -p webstore
+```
 
-**Note:** SQL scripts in `/docker-entrypoint-initdb.d/` run only when MariaDB initializes an **empty data directory**. Restarting a container with an existing volume does not re-import the dump. Do not delete an existing database volume simply to re-run initialization without first safeguarding its data.
+```sql
+SHOW TABLES;
+DESCRIBE products;
+SELECT id, name, price, stock_quantity FROM products LIMIT 5;
+```
 
-## Spring Boot configuration
+**Important:** Scripts mounted in `/docker-entrypoint-initdb.d/` run only when MariaDB initializes an **empty** data directory. Restarting a container with its existing volume does not re-import the schema. Never remove a volume just to rerun initialization without safeguarding the data.
 
-In `src/main/resources/application.properties`:
+### 2. Apply project-specific database features
+
+From the Spring Boot project root, run the version-controlled SQL script **after** the baseline schema has been imported and **before** starting Spring Boot (the JPA entities map to the view and history table):
+
+```bash
+docker exec -i webstore-mariadb mariadb -u root -p webstore < database/01_database_features.sql
+```
+
+**Shell caveat:** With `docker exec -i` consuming standard input from the SQL file, an interactive password prompt may not work as expected. A reliable alternative is to first copy the script into the container, then execute it in an interactive MariaDB session:
+
+```bash
+docker cp database/01_database_features.sql webstore-mariadb:/tmp/01_database_features.sql
+docker exec -it webstore-mariadb mariadb -u root -p webstore
+```
+
+At the `MariaDB [webstore]>` prompt, run:
+
+```sql
+SOURCE /tmp/01_database_features.sql;
+```
+
+The script uses MariaDB command-client `DELIMITER` directives for trigger creation. The `IF NOT EXISTS` / `OR REPLACE` statements support repeated setup runs, but this is **not** a full migration/versioning solution. Review schema changes before reapplying in shared environments. Don't commit passwords.
+
+Verify the database objects:
+
+```sql
+SHOW FULL TABLES WHERE Table_type = 'VIEW';
+SHOW INDEX FROM products WHERE Key_name = 'idx_products_price';
+SHOW TRIGGERS LIKE 'products';
+SELECT * FROM product_catalog_view LIMIT 5;
+```
+
+The history table starts empty on a fresh database and fills when prices change. **Historical entries from local testing are data, not supplied by the setup script.**
+
+### 3. Configure and run Spring Boot
+
+`src/main/resources/application.properties`:
 
 ```properties
 spring.application.name=webstore
@@ -107,9 +137,7 @@ spring.jpa.show-sql=true
 spring.jpa.properties.hibernate.format_sql=true
 ```
 
-`ddl-auto=validate` checks JPA mappings against the existing database schema without modifying it.
-
-From **Git Bash on Windows**, set credentials for the current terminal session and start the application:
+From **Git Bash**:
 
 ```bash
 export DB_USERNAME="webstore_app"
@@ -117,54 +145,51 @@ export DB_PASSWORD="<your-app-password>"
 ./mvnw spring-boot:run
 ```
 
-The URL uses host port **3307**, corresponding to the Docker Compose mapping `3307:3306`. If your host-side port is **3306**, adjust the URL accordingly. Avoid putting real credentials in tracked configuration or screenshots/logs.
+The host JDBC port `3307` maps to the container's MariaDB port `3306`. If your setup differs, adjust the JDBC URL. Never publish real credentials, `.env` files, or sensitive logs.
 
-The API is served at `http://localhost:8080` unless you change `server.port`.
+## REST API reference
 
-## REST API reference (implemented)
+Base URL: `http://localhost:8080`. All JSON examples use illustrative IDs except where explicitly described as local test observations. Actual IDs and prices depend on the imported data and subsequent changes.
 
 ### Product categories
 
-| Method | Endpoint | Purpose | Successful response |
+| Method | Endpoint | Purpose | Expected success |
 |---|---|---|---|
-| GET | `/api/categories` | List all categories | `200 OK` — JSON array |
-| GET | `/api/categories/{id}` | Get one category | `200 OK` — JSON object |
-| POST | `/api/categories` | Create a category | `201 Created` — saved JSON object |
-| PUT | `/api/categories/{id}` | Update a category | `200 OK` — updated JSON object |
-| DELETE | `/api/categories/{id}` | Delete a category | `204 No Content` |
+| GET | `/api/categories` | List categories | `200 OK` |
+| GET | `/api/categories/{id}` | Retrieve category | `200 OK`; `404` if absent |
+| POST | `/api/categories` | Create category | `201 Created` |
+| PUT | `/api/categories/{id}` | Update category | `200 OK` |
+| DELETE | `/api/categories/{id}` | Delete category if unreferenced | `204 No Content` |
+| GET | `/api/categories/{id}/product-count` | Count products associated with category | `200 OK` |
 
-Example category request body for **POST** or **PUT**:
-
-```json
-{
-  "name": "Test Category",
-  "description": "Created through the API"
-}
-```
-
-Example response (illustrative; generated ID depends on the database):
+POST/PUT request:
 
 ```json
-{
-  "id": 12,
-  "name": "Test Category",
-  "description": "Created through the API"
-}
+{"name":"Test Category","description":"Created through the API"}
 ```
 
-Missing IDs return `404 Not Found`. A deletion prevented by a foreign-key constraint returns a generic `409 Conflict` after the database-integrity handler is applied. Category input validation is not yet comprehensive.
+Illustrative category response:
+
+```json
+{"id":12,"name":"Test Category","description":"Created through the API"}
+```
+
+The category product-count endpoint traverses a lazy `@OneToMany` association in a read-only transaction. The exact JSON representation of the count endpoint should be checked against the current controller before final submission.
 
 ### Products
 
-| Method | Endpoint | Purpose | Successful response |
+| Method | Endpoint | Purpose | Expected success |
 |---|---|---|---|
-| GET | `/api/products` | List all products | `200 OK` — JSON array |
-| GET | `/api/products/{id}` | Get one product | `200 OK` — JSON object |
-| POST | `/api/products` | Create a product | `201 Created` — saved JSON object |
-| PUT | `/api/products/{id}` | Update a product | `200 OK` — updated JSON object |
-| DELETE | `/api/products/{id}` | Delete a product | `204 No Content` |
+| GET | `/api/products` | List products | `200 OK` |
+| GET | `/api/products/{id}` | Retrieve product | `200 OK`; `404` if absent |
+| POST | `/api/products` | Create product | `201 Created` |
+| PUT | `/api/products/{id}` | Update product | `200 OK` |
+| DELETE | `/api/products/{id}` | Delete product if unreferenced | `204 No Content` |
+| GET | `/api/products/catalog` | List combined product/category records from SQL view | `200 OK` |
+| GET | `/api/products/catalog/{id}` | Retrieve product from SQL view | `200 OK`; `404` if absent |
+| GET | `/api/products/{id}/price-history` | List recorded price changes, newest first | `200 OK` |
 
-Example **POST** or **PUT** request body:
+POST/PUT request:
 
 ```json
 {
@@ -177,7 +202,7 @@ Example **POST** or **PUT** request body:
 }
 ```
 
-Example response (illustrative):
+Illustrative product response:
 
 ```json
 {
@@ -192,146 +217,267 @@ Example response (illustrative):
 }
 ```
 
-Product requests use `ProductRequest` and responses use `ProductResponse`. The `categoryId` must refer to an existing category if it is not `null`. The service currently stores `supplierId` as a scalar without checking whether the supplier exists; for reliable initial testing, use `null` for that field.
+The service validates a supplied category ID, while `supplierId` is currently a scalar field without an explicit service-level existence check. Invalid foreign-key references may therefore be rejected by MariaDB. For safe demonstration requests, `supplierId: null` is suitable. Product deletion can be blocked by order-item or history foreign keys (`409 Conflict`).
 
-Errors observed or explicitly handled:
+Catalog view example:
 
-| Case | Status | Response |
-|---|---|---|
-| Requested product/category does not exist | `404 Not Found` | Empty response body |
-| Product references an unknown category on create/update | `400 Bad Request` | JSON error message |
-| Delete/update violates a database relationship | `409 Conflict` | Generic JSON error message |
+```json
+{
+  "productId": 1,
+  "productName": "Super Bug 360",
+  "price": 30.00,
+  "stockQuantity": 134,
+  "categoryId": 2,
+  "categoryName": "Kodin tarvikkeet"
+}
+```
 
-For PUT, supply the complete editable product representation. A `null` category ID clears the category association.
+Price-history example from local testing (`GET /api/products/1/price-history`):
 
-### Test using Git Bash
+```json
+[
+  {"id":2,"productId":1,"oldPrice":25.00,"newPrice":30.00,"changedAt":"2026-10-11T17:33:53"},
+  {"id":1,"productId":1,"oldPrice":22.22,"newPrice":25.00,"changedAt":"2026-10-11T16:55:44"}
+]
+```
+
+An existing product with no recorded changes returns an empty JSON array. A nonexistent product currently goes through the service's `IllegalArgumentException` handling (`400`), rather than a dedicated `404` mapping; improving this is future work.
+
+### Customers
+
+| Method | Endpoint | Purpose | Expected success |
+|---|---|---|---|
+| GET | `/api/customers` | List customers | `200 OK` |
+| GET | `/api/customers/{id}` | Retrieve customer | `200 OK`; `404` if absent |
+| POST | `/api/customers` | Create customer | `201 Created` |
+
+POST request:
+
+```json
+{"firstName":"Test","lastName":"Customer","email":"test.customer@example.com","phone":null}
+```
+
+Illustrative response:
+
+```json
+{"id":100001,"firstName":"Test","lastName":"Customer","email":"test.customer@example.com","phone":null}
+```
+
+Customer update and delete operations are **not yet implemented**.
+
+### Orders
+
+| Method | Endpoint | Purpose | Expected success |
+|---|---|---|---|
+| GET | `/api/orders` | List orders, including items and calculated total | `200 OK` |
+| GET | `/api/orders/{id}` | Retrieve an order and its items | `200 OK`; `404` if absent |
+| POST | `/api/orders` | Create multi-item order and reduce stock atomically | `201 Created` |
+
+POST request (replace IDs with existing customer and products):
+
+```json
+{
+  "customerId": 100001,
+  "shippingAddressId": null,
+  "items": [
+    {"productId": 1, "quantity": 2},
+    {"productId": 2, "quantity": 1}
+  ]
+}
+```
+
+Response shape (values illustrative, not a promised database result):
+
+```json
+{
+  "id": 200001,
+  "customerId": 100001,
+  "orderDate": "2026-10-11T18:30:00",
+  "deliveryDate": null,
+  "shippingAddressId": null,
+  "status": "NEW",
+  "items": [
+    {"productId":1,"productName":"Super Bug 360","quantity":2,"unitPrice":30.00,"subtotal":60.00},
+    {"productId":2,"productName":"Happy Pack 382","quantity":1,"unitPrice":546.08,"subtotal":546.08}
+  ],
+  "totalAmount": 606.08
+}
+```
+
+Order creation behavior:
+
+1. Validate customer ID, nonempty items, positive quantities, and no duplicate product IDs.
+2. Sort product IDs and acquire `PESSIMISTIC_WRITE` locks when loading products for stock updates.
+3. Reject an item when requested quantity exceeds available stock.
+4. Copy the current product price into each order item's `unit_price` (historical order pricing).
+5. Persist the order and its order items (`CascadeType.PERSIST`) and reduce stock in one `@Transactional` operation.
+6. Calculate each subtotal and order total using `BigDecimal`.
+
+At present, `shippingAddressId` must be `null`; non-null shipping address requests are rejected until address validation is implemented. Order status changes, cancellation, and delete operations are not yet implemented. Stock-lock behavior depends on all writers following compatible transactional access patterns.
+
+### Error behavior and limitations
+
+| Case | Current behavior |
+|---|---|
+| GET a missing product/category/customer/order by ID | `404 Not Found` (where implemented) |
+| Unknown category/customer in create flow | `400 Bad Request` with error message |
+| Invalid order quantities, duplicate product IDs, insufficient stock | `400 Bad Request` |
+| Database foreign-key/integrity conflict | `409 Conflict` through the global handler |
+| Missing product in price-history service | Currently `400 Bad Request` |
+
+Validation is not yet comprehensive: invalid or blank names, negative prices/stock, malformed inputs, and all database constraint failures have not been exhaustively tested. The system has no authentication/authorization layer.
+
+### Manual API examples
 
 ```bash
-# List categories
+# Browse products/categories and retrieve view-backed catalog
 curl -i http://localhost:8080/api/categories
-
-# Get product by ID
+curl -i http://localhost:8080/api/categories/2/product-count
 curl -i http://localhost:8080/api/products/1
+curl -i http://localhost:8080/api/products/catalog/1
 
-# Create product; choose an existing category ID
-curl -i -X POST http://localhost:8080/api/products \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Test Wireless Keyboard","description":"Test product","price":49.99,"stockQuantity":20,"categoryId":1,"supplierId":null}'
+# Price history (records appear after a product's price is changed)
+curl -i http://localhost:8080/api/products/1/price-history
 
-# Update product; replace ID with your created test product ID
-curl -i -X PUT http://localhost:8080/api/products/1001 \
-  -H "Content-Type: application/json" \
-  -d '{"name":"Updated Keyboard","description":"Updated test product","price":39.99,"stockQuantity":15,"categoryId":1,"supplierId":null}'
+# Browse customers/orders
+curl -i http://localhost:8080/api/customers
+curl -i http://localhost:8080/api/orders/1
 
-# Delete only a safe test product with no order-item references
-curl -i -X DELETE http://localhost:8080/api/products/1001
+# Create customer
+curl -i -X POST http://localhost:8080/api/customers \
+  -H 'Content-Type: application/json' \
+  -d '{"firstName":"Test","lastName":"Customer","email":"test.customer@example.com","phone":null}'
+
+# Create an order: replace CUSTOMER_ID with an existing ID
+curl -i -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customerId":CUSTOMER_ID,"shippingAddressId":null,"items":[{"productId":1,"quantity":2}]}'
+
+# Insufficient-stock rejection; use a valid customer ID
+curl -i -X POST http://localhost:8080/api/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customerId":CUSTOMER_ID,"shippingAddressId":null,"items":[{"productId":1,"quantity":10000}]}'
 ```
 
-IDs `1` and `1001` are **examples**, not guaranteed records. Only delete your own disposable test data.
+Use disposable test records and confirm available stock before POST requests. The examples above **change the database** when they create customers or orders.
 
-## Architecture
+## Architecture and relational mappings
 
 ```text
-HTTP client
-  → REST Controller
-    → Service (business logic / transactions)
-      → Spring Data JPA Repository
-        → Hibernate / MariaDB
+HTTP Client
+    → REST Controller
+        → Service (business logic, validation, transactions)
+            → Spring Data JPA Repository
+                → Hibernate / MariaDB
 ```
 
-Main code packages:
+Source packages live under `src/main/java/com/github/bhandarisachin/webstore/`:
 
-```text
-src/main/java/com/github/bhandarisachin/webstore/
-├── controller/
-│   ├── ProductCategoryController.java
-│   └── ProductController.java
-├── dto/
-│   ├── ProductRequest.java
-│   └── ProductResponse.java
-├── entity/
-│   ├── ProductCategory.java
-│   └── Product.java
-├── exception/
-│   └── GlobalExceptionHandler.java
-├── repository/
-│   ├── ProductCategoryRepository.java
-│   └── ProductRepository.java
-├── service/
-│   ├── ProductCategoryService.java
-│   └── ProductService.java
-└── WebstoreApplication.java
-```
+- `controller`: product/category, customer, order, and catalog controllers.
+- `service`: corresponding business logic plus price-history retrieval.
+- `repository`: Spring Data JPA interfaces.
+- `entity`: JPA mappings for products, categories, customers, orders, order items, catalog view, and price history.
+- `dto`: request/response records for products, customers, and orders.
+- `exception`: centralized error handling.
 
-This tree describes the files implemented during development; confirm local filenames/locations before final submission.
+Key relationships:
 
-## Database design and integrity
+- `products.category_id` → `productcategories.id` (`Product` many-to-one; reverse category one-to-many).
+- `products.supplier_id` → `suppliers.id` (currently scalar `supplierId` in Java).
+- `orders.customer_id` → `customers.id` (order many-to-one).
+- `orderitems.order_id` → `orders.id`; `orderitems.product_id` → `products.id`.
+- `orderitems` has composite primary key `(order_id, product_id)` mapped with `@EmbeddedId` and `@MapsId`.
+- Order-to-order-items uses bidirectional one-to-many/many-to-one with `CascadeType.PERSIST`, avoiding cascade deletion of products.
 
-The current API mainly uses these tables from the provided schema:
-
-- `productcategories`: `id`, `name`, `description`.
-- `products`: `id`, `name`, `description`, `price`, `stock_quantity`, `category_id`, `supplier_id`.
-- `suppliers`: referenced by `products.supplier_id`, but no Supplier API is implemented yet.
-- `orderitems`: references products and can prevent deletion of products involved in orders.
-
-Key relationships confirmed from `SHOW CREATE TABLE products`:
-
-```text
-products.category_id → productcategories.id
-products.supplier_id → suppliers.id
-orderitems.product_id → products.id  (confirmed by deletion constraint error)
-```
-
-MariaDB enforces referential integrity. A deletion of an order-referenced product produced a foreign-key violation; the API now maps integrity violations to `409 Conflict` instead of exposing a `500 Internal Server Error`.
-
-`Product` currently uses `@ManyToOne(fetch = LAZY)` for category. Bidirectional `@OneToMany` mapping, cascading tests, and fetch-performance comparisons are upcoming work.
+JPA relationships use lazy fetching where appropriate. Listing every order or catalog product without pagination can become expensive, and N+1 queries may arise. Pagination and fetch-plan optimization remain future improvements.
 
 ## Database features and assessment evidence
 
-The course requires appropriate application and documentation of database techniques. The following reflects **current implementation status**, not a claim that the entire course project is finished.
+### Indexing and `EXPLAIN`
 
-| Feature | Status / next evidence |
-|---|---|
-| Primary/foreign keys | Existing schema used; product/category and product/order-item constraints observed |
-| Existing schema indexes | Product foreign-key indexes observed; deliberate search-index design and performance measurements pending |
-| Views | Inspect existing dump objects; application-specific usage/documentation pending |
-| Triggers | Inspect existing dump objects; implementation and demonstration pending |
-| Transactions | `@Transactional` used in relevant service operations; multi-table order creation and rollback demonstration pending |
-| Temporal features | Product price-history solution and query/API demonstration pending |
-| Events | Database event scheduler enabled in Compose; actual scheduled-event implementation/evidence pending |
-| Database security | Separate app database user configured; least-privilege review pending |
-| Backup/recovery | Backup and restore procedure/testing pending |
-| Schema changes | Migration/change-management approach pending |
-| API tests | Manual cURL checks performed; automated tests and reproducible test evidence pending |
+The original `products` table had indexes on its primary key, `category_id`, and `supplier_id`. We added:
 
-## Planned functionality
+```sql
+CREATE INDEX IF NOT EXISTS idx_products_price ON products(price);
+```
 
-To meet the original requirement of a **small order management system / webshop backend**, the next implementation stages are:
+Observed plans during local testing:
 
-1. Finish and verify the category/product JPA relationship, including suitable fetching/cascading decisions.
-2. Add essential customer and order endpoints, including order items.
-3. Implement transactional order creation with inventory checks and stock updates.
-4. Add practical product search/filtering and evaluate query performance with indexes and `EXPLAIN`.
-5. Expose a useful SQL view and implement/document price-change history with triggers or other temporal techniques.
-6. Verify database permissions, event usage if justified, backup/restore, and schema-change practices.
-7. Complete automated tests, manual API examples, and final README evidence.
+| Query | `type` | `possible_keys` | `key` | Estimated `rows` | `Extra` |
+|---|---|---|---|---:|---|
+| `SELECT * ... WHERE price BETWEEN 100 AND 500` (after index) | `ALL` | `idx_products_price` | `NULL` | 1000 | `Using where` |
+| `SELECT id, price ... WHERE price BETWEEN 100 AND 110` | `range` | `idx_products_price` | `idx_products_price` | 12 | `Using where; Using index` |
 
-The instructor's project description evaluates API scope, versatile database-feature use, and documentation quality. Specific additional mappings (such as inheritance or M:N) will be prioritized only if required by the separate course assignments or useful for this implementation.
+The second query can be covered by the price index because an InnoDB secondary index contains its indexed value and the primary key. These are **different queries**, so the row estimates should not be interpreted as a controlled before/after speed measurement. Indexes have storage and write-maintenance costs and are not always chosen by the optimizer.
+
+Reproduce the explain plans:
+
+```sql
+EXPLAIN SELECT * FROM products WHERE price BETWEEN 100 AND 500;
+EXPLAIN SELECT id, price FROM products WHERE price BETWEEN 100 AND 110;
+```
+
+### View: `product_catalog_view`
+
+The view combines products with optional categories using a `LEFT JOIN`. It exposes `product_id`, `product_name`, `price`, `stock_quantity`, `category_id`, and `category_name` to `/api/products/catalog` and `/api/products/catalog/{id}`. Products with no category still appear with a null category name. It is mapped as an immutable JPA entity for read-only access.
+
+### Trigger and price history
+
+`product_price_history` stores `product_id`, `old_price`, `new_price`, and `changed_at`. The `trg_product_price_history` trigger runs **AFTER UPDATE** on `products` and inserts a history record only if `OLD.price <> NEW.price`.
+
+Local test results for Product ID 1:
+
+- Price changed `22.22 → 25.00`: history entry inserted.
+- Updating to the same price `25.00`: no new entry.
+- Price changed `25.00 → 30.00`: second entry inserted.
+- A transaction temporarily changed `30.00 → 35.00`, then `ROLLBACK`: price returned to `30.00`, and the two committed history records remained.
+
+The trigger runs at database level, including updates outside Spring Boot. The audit insertion participates in the product-update transaction, so both roll back together.
+
+### Transactions and concurrency
+
+`OrderService.createOrder()` uses `@Transactional` for order item persistence and stock reduction. Product loading uses `PESSIMISTIC_WRITE` and sorted product IDs to reduce conflicting-write risks and deadlock likelihood.
+
+Manual tests performed:
+
+- Successful order creation reduced available stock.
+- Oversized quantity was rejected with `400` and stock remained unchanged.
+- Multi-item order failed on a later item after an earlier in-memory stock decrement; the transaction rolled back, leaving product stock unchanged.
+
+This confirms the tested rollback scenarios, **not** exhaustive concurrency correctness. A dedicated simultaneous-order integration test remains to be added.
+
+### Security and recoverability
+
+- Credentials are provided via environment variables rather than committed properties.
+- An application database user is configured, but actual privileges still need review for least privilege. The current prototype does not implement application-level authentication.
+- A Docker named volume holds database data; a named volume is **not a backup**. A tested export/restore procedure is still needed.
+- The MariaDB event scheduler is enabled in the example Compose setup, but no scheduled database event has been demonstrated. Do not cite that as implemented event functionality.
+- The additional schema features are versioned in `database/01_database_features.sql`; a formal migration tool (such as Flyway or Liquibase) has not been configured.
+
+## Known limitations and next work
+
+- Add comprehensive validation, domain-specific 404/409 handling, and automated API/integration tests.
+- Implement any remaining customer/order CRUD operations actually required by the instructor (currently customer update/delete and order updates/cancellations are absent).
+- Add pagination, useful search/filter endpoints, and improve N+1/fetch performance.
+- Verify least-privilege database access and backup/restore on a disposable database.
+- Complete schema-change/migration practices and final deployment/reproducibility verification.
+- Confirm all endpoint request/response formats against the final Java code before submission.
 
 ## Build and test
 
-With the MariaDB container running and credentials configured in the terminal:
+With MariaDB running, project-specific SQL objects created, and credentials configured:
 
 ```bash
+./mvnw compile
 ./mvnw clean package
 ./mvnw spring-boot:run
 ```
 
-Automated tests may require a configured test database/application context. Do not treat manual endpoint testing as a substitute for passing the Maven test suite.
+`clean package` runs configured Maven tests; a successful compile alone is not evidence that integration tests pass. Manual API checks and database rollback tests described above are supplementary evidence.
 
 ## Development notes
 
-- The REST API is a course project, not a production-deployed or security-hardened service.
-- Never commit `.env`, plaintext passwords, or generated build artifacts.
-- Keep the teacher's original SQL dump as the baseline; document any schema changes separately.
-- Commit features in small, working increments with descriptive Git messages.
+- The API is a coursework prototype, not a security-hardened service.
+- Never commit `.env`, credentials, database dumps containing confidential data, or generated build artifacts.
+- Retain the teacher-provided SQL schema as the baseline and keep custom database changes separate.
+- Use small, descriptive Git commits and update this README when behavior changes.
