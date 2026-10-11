@@ -2,7 +2,7 @@
 
 A Java Spring Boot backend for the **Database Solutions** course, built around the course-provided relational `webstore` schema in MariaDB. The project implements product and category management, customer lookup/creation, transactional order placement, catalog reporting, and product price-change history.
 
-> **Status:** Functional coursework prototype. The endpoints and database features described below have been developed and manually exercised during the project. Automated integration tests, complete input validation, least-privilege database permissions, and backup/restore verification remain outstanding. Do not treat this as a production-ready webshop.
+> **Status:** Functional coursework prototype. Core order processing, SQL view, price-history trigger, unit/integration tests, least-privilege database grants, and a separate-database backup/restore exercise have been implemented and tested during development. Comprehensive validation, some customer/order CRUD operations, automated concurrency coverage, and a fully verified fresh-install workflow remain outstanding. This is not a production-ready webshop.
 
 ## Technology stack
 
@@ -21,6 +21,8 @@ A Java Spring Boot backend for the **Database Solutions** course, built around t
 - Price-search index (`idx_products_price`) with `EXPLAIN` comparison.
 - Price-history table and trigger that records changes to `products.price`, with a read-only history endpoint.
 - API error handling for invalid arguments (`400`) and foreign-key/integrity conflicts (`409`) in the established service paths.
+- Automated JUnit/Mockito tests and real-MariaDB integration tests, including a service-managed transaction rollback test.
+- Restricted runtime database grants, plus a demonstrated backup and restore into a separate database.
 
 ## Prerequisites
 
@@ -35,46 +37,49 @@ The examples assume MariaDB is published on **host port 3307** and Spring Boot o
 
 The application uses the course-provided schema. Hibernate validates mappings rather than generating tables.
 
-### 1. Start MariaDB and import the provided schema
+### 1. Configure Docker Compose and import the provided schema
 
-Place `schema_populated_dump.sql` alongside your database `compose.yaml`. Review the dump for `CREATE DATABASE`, `USE`, or destructive SQL before importing it. An example Compose configuration follows:
+The repository includes **`compose.yaml` in the project root**. It configures MariaDB 11.4, exposes container port `3306` on host `127.0.0.1:3307`, and uses a named volume to persist database files. Its relevant configuration is:
 
 ```yaml
-services:
-  database:
-    image: mariadb:11.4
-    container_name: webstore-mariadb
-    restart: unless-stopped
-    environment:
-      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
-      MARIADB_DATABASE: webstore
-      MARIADB_USER: webstore_app
-      MARIADB_PASSWORD: ${DB_PASSWORD}
-    ports:
-      - "127.0.0.1:3307:3306"
-    volumes:
-      - webstore-data:/var/lib/mysql
-      - ./schema_populated_dump.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-    command:
-      - --event-scheduler=ON
-    healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
+environment:
+  MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+  MARIADB_DATABASE: webstore
+  MARIADB_USER: webstore_app
+  MARIADB_PASSWORD: ${DB_PASSWORD}
 volumes:
-  webstore-data:
+  - webstore-data:/var/lib/mysql
+  - ./database/schema_populated_dump.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 ```
 
-Create an **untracked** `.env` file in the Compose directory containing `DB_ROOT_PASSWORD` and `DB_PASSWORD`. Ensure `.env` is ignored by Git. Then run:
+The original **course-provided, populated schema dump** is a local prerequisite, **not part of this repository**. Place it at `database/schema_populated_dump.sql`, relative to the root-level `compose.yaml`. Review its `CREATE DATABASE`, `USE`, and destructive statements before importing it. Keep this data dump out of Git; `database/01_database_features.sql` is the separate version-controlled project script.
+
+Create **`.env` in the project root**, alongside `compose.yaml`:
+
+```dotenv
+DB_ROOT_PASSWORD=replace_with_root_password
+DB_USERNAME=webstore_app
+DB_PASSWORD=replace_with_app_password
+```
+
+Use appropriate local passwords; **do not commit `.env`**. Docker Compose automatically reads this `.env` for `${DB_ROOT_PASSWORD}` and `${DB_PASSWORD}` substitutions. `DB_USERNAME` is provided for the Spring Boot process but is not referenced by the Compose service as currently configured. Ensure `.gitignore` excludes `.env`, `database/schema_populated_dump.sql`, and temporary SQL exports. Do not confuse `.env` with `.env.local`, which Docker Compose does not automatically load by default.
+
+From the project root, check the Compose syntax first:
+
+```bash
+docker compose config --quiet
+```
+
+**Fresh setup only:** On an installation without an existing MariaDB container/volume, use:
 
 ```bash
 docker compose up -d
 docker compose ps
 ```
 
-Connect to inspect the imported schema:
+If migrating from the earlier **WSL2 Compose project**, do **not** immediately run `docker compose up` from the newly relocated project: Compose normally prefixes named volumes with the Compose project name. The new directory can therefore refer to a different `webstore-data` volume, while `container_name: webstore-mariadb` can conflict with the existing container. First inspect the existing container and volume, and choose an intentional migration/reuse approach. Never run `docker compose down -v` or delete a populated volume merely to force the initialization scripts to rerun.
+
+Once MariaDB is running, inspect the imported schema:
 
 ```bash
 docker exec -it webstore-mariadb mariadb -u webstore_app -p webstore
@@ -86,17 +91,13 @@ DESCRIBE products;
 SELECT id, name, price, stock_quantity FROM products LIMIT 5;
 ```
 
-**Important:** Scripts mounted in `/docker-entrypoint-initdb.d/` run only when MariaDB initializes an **empty** data directory. Restarting a container with its existing volume does not re-import the schema. Never remove a volume just to rerun initialization without safeguarding the data.
+**Initialization behavior:** The dump mounted under `/docker-entrypoint-initdb.d/` executes only when MariaDB initializes an **empty** data directory. It does not run again after container restarts. Changing `.env` also does **not** reset database-user passwords inside an already initialized volume. The current Compose file mounts the baseline dump **only**; execute `database/01_database_features.sql` separately in the next step.
 
 ### 2. Apply project-specific database features
 
 From the Spring Boot project root, run the version-controlled SQL script **after** the baseline schema has been imported and **before** starting Spring Boot (the JPA entities map to the view and history table):
 
-```bash
-docker exec -i webstore-mariadb mariadb -u root -p webstore < database/01_database_features.sql
-```
-
-**Shell caveat:** With `docker exec -i` consuming standard input from the SQL file, an interactive password prompt may not work as expected. A reliable alternative is to first copy the script into the container, then execute it in an interactive MariaDB session:
+**Recommended (works from Git Bash or WSL2):** Copy the script into the container, then execute it in an interactive MariaDB session as an administrator:
 
 ```bash
 docker cp database/01_database_features.sql webstore-mariadb:/tmp/01_database_features.sql
@@ -109,7 +110,7 @@ At the `MariaDB [webstore]>` prompt, run:
 SOURCE /tmp/01_database_features.sql;
 ```
 
-The script uses MariaDB command-client `DELIMITER` directives for trigger creation. The `IF NOT EXISTS` / `OR REPLACE` statements support repeated setup runs, but this is **not** a full migration/versioning solution. Review schema changes before reapplying in shared environments. Don't commit passwords.
+The script uses MariaDB command-client `DELIMITER` directives for trigger creation. If executed by root, the newly created view and trigger may have root as their `DEFINER`; the object definer must exist and have the appropriate privileges on a different installation. Do not assume a schema-only script recreates user grants. The `IF NOT EXISTS` / `OR REPLACE` statements support repeated setup runs, but this is **not** a full migration/versioning solution. Review schema changes before reapplying in shared environments. Don't commit passwords.
 
 Verify the database objects:
 
@@ -137,11 +138,12 @@ spring.jpa.show-sql=true
 spring.jpa.properties.hibernate.format_sql=true
 ```
 
-From **Git Bash**:
+Docker Compose reads `.env`, but **Spring Boot launched directly through Maven or IntelliJ does not automatically load that file**. Provide the same application credentials as process environment variables (or configure them in your IntelliJ run configuration). From **Git Bash** (exports do not persist into new sessions):
 
 ```bash
 export DB_USERNAME="webstore_app"
-export DB_PASSWORD="<your-app-password>"
+read -rsp "Database password: " DB_PASSWORD; echo
+export DB_PASSWORD
 ./mvnw spring-boot:run
 ```
 
@@ -446,38 +448,137 @@ Manual tests performed:
 
 This confirms the tested rollback scenarios, **not** exhaustive concurrency correctness. A dedicated simultaneous-order integration test remains to be added.
 
-### Security and recoverability
+## Database Backup and Recovery
 
-- Credentials are provided via environment variables rather than committed properties.
-- An application database user is configured, but actual privileges still need review for least privilege. The current prototype does not implement application-level authentication.
-- A Docker named volume holds database data; a named volume is **not a backup**. A tested export/restore procedure is still needed.
-- The MariaDB event scheduler is enabled in the example Compose setup, but no scheduled database event has been demonstrated. Do not cite that as implemented event functionality.
-- The additional schema features are versioned in `database/01_database_features.sql`; a formal migration tool (such as Flyway or Liquibase) has not been configured.
+The Webstore project uses MariaDB 11.4 with InnoDB tables. Database backup and recovery were tested using Docker and WSL2 Ubuntu.
+
+### Backup procedure
+
+A logical database backup was created using `mariadb-dump` with the following options:
+
+- `--single-transaction` for a consistent InnoDB snapshot under normal conditions.
+- `--routines` and `--events` to include stored routines and scheduled events.
+- `--triggers` to include database triggers.
+
+Example command:
+
+```bash
+docker exec -it webstore-mariadb \
+  mariadb-dump -u root -p \
+  --single-transaction \
+  --routines --events --triggers \
+  --result-file=/tmp/webstore_backup.sql \
+  webstore
+```
+
+Copy the backup to WSL2:
+
+```bash
+docker cp webstore-mariadb:/tmp/webstore_backup.sql \
+  ~/webstore-backups/webstore_backup.sql
+```
+
+### Restoration procedure
+
+A separate database, `webstore_restore_test`, was created to avoid modifying the original database.
+
+After inspecting the backup for database-selection statements and explicit references to the original database, it was copied into the Docker container and restored using the MariaDB client:
+
+```sql
+SOURCE /tmp/webstore_backup.sql;
+```
+
+The selected database must be verified as `webstore_restore_test` before running this command.
+
+### Recovery verification
+
+The restoration was tested successfully:
+
+| Database object | Verified result |
+|---|---|
+| Products | 1,000 records |
+| Customers | 100,001 records |
+| Orders | 200,001 records |
+| Order items | 1,099,774 records |
+| Price history | 2 records |
+| Product catalog view | Successfully queried |
+| Price-history trigger | Executed successfully |
+
+The restored product catalog view initially failed because its `webstore_app` definer lacked permissions on the restoration database. The required permissions were granted to the definer account, and the view subsequently worked.
+
+The restored price-history trigger was also tested by temporarily updating a product price from €30.00 to €35.00. The trigger recorded the change, and `ROLLBACK` restored the original price and history count.
+
+This demonstrates that successful recovery requires verification of data, database objects, transactions, and the permissions used by stored database objects.
+
+**Security:** Backup files contain database records and must not be committed to GitHub. The administrative account is used for backup and restoration, while the application account has restricted permissions on the main database.
+
+### Database privileges and remaining security limitations
+
+- Application credentials are supplied using `DB_USERNAME` and `DB_PASSWORD`; keep local credential files and actual passwords outside version control.
+- The tested local main-database grants for `webstore_app` were restricted from `ALL PRIVILEGES` to `SELECT, INSERT, UPDATE, DELETE, TRIGGER` on `webstore.*`. Run `SHOW GRANTS FOR 'webstore_app'@'%';` as an administrator to inspect the active grants. The independent `webstore_test` database retained broader development-only privileges.
+- The original catalog view uses `SQL SECURITY DEFINER`, and the price-history trigger has `webstore_app` as definer in the tested database. Price updates, trigger insertion, rollback, and a view query were successfully retested after permission restrictions. Schema scripts executed under a different administrator may create objects with a different definer.
+- To reproduce the restricted local grant *after initial schema/object creation*, an administrator can apply the following, but should inspect existing grants and definers first:
+
+```sql
+REVOKE ALL PRIVILEGES ON webstore.* FROM 'webstore_app'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, TRIGGER ON webstore.* TO 'webstore_app'@'%';
+```
+
+- The runtime database account still has database-wide DML permissions and `TRIGGER` privilege because of the current trigger design. These are not the strictest possible production grants. No application-level authentication or authorization has been implemented.
+- Docker volumes preserve database data across container restarts, but they are **not backups**. The separate restore test described above was completed. The event scheduler was enabled in the example Compose setup, but no scheduled event is claimed as implemented.
+- Custom schema features are versioned in `database/01_database_features.sql`. No Flyway/Liquibase-style migration framework is configured.
+
+## Automated tests
+
+The test suite was developed and reported passing using the dedicated `webstore_test` MariaDB database. `src/test/resources/application-test.properties` sets the JDBC database to `webstore_test`; all Spring context/integration tests must activate the `test` profile. Mockito-based unit tests do not require a running database.
+
+- `WebstoreApplicationTests`: Spring application context startup using `@ActiveProfiles("test")`.
+- `OrderServiceTest`: invalid empty orders, insufficient stock, duplicate product IDs, and successful order creation logic with mocked repositories.
+- `OrderIntegrationTest`: saving a customer, persisting an order and its items, checking stock changes, and exercising a failure path with test-managed transaction rollback.
+- `OrderRollbackIntegrationTest`: checks the real database inventory and order count after an unsuccessful order service transaction. Its fixture data is committed to the **test** database and cleaned up afterward.
+
+Integration-test setup: create an isolated `webstore_test` database, import the *schema only* from the original database, and grant the local test user suitable rights to that database. The schema-only export was generated with `mariadb-dump --no-data --skip-triggers`; this creates tables/views but does **not** populate records or install triggers. Test fixtures are inserted by test code. Do not point test-profile JDBC settings at the populated `webstore` database.
+
+From the project root, with the Docker container running and database credentials available in the **same terminal**:
+
+```bash
+./mvnw clean test
+./mvnw clean package
+```
+
+For an individual test:
+
+```bash
+./mvnw -Dtest=OrderRollbackIntegrationTest test
+```
+
+`BUILD SUCCESS` with an executed test count verifies the configured tests passed in that environment; it is not evidence of exhaustive validation, security, or concurrency coverage. Mockito may emit a Java-agent self-attachment warning that should be addressed in a future test-build configuration.
 
 ## Known limitations and next work
 
-- Add comprehensive validation, domain-specific 404/409 handling, and automated API/integration tests.
-- Implement any remaining customer/order CRUD operations actually required by the instructor (currently customer update/delete and order updates/cancellations are absent).
-- Add pagination, useful search/filter endpoints, and improve N+1/fetch performance.
-- Verify least-privilege database access and backup/restore on a disposable database.
-- Complete schema-change/migration practices and final deployment/reproducibility verification.
-- Confirm all endpoint request/response formats against the final Java code before submission.
+- Complete field validation, standardized domain-specific HTTP errors, and automated HTTP-controller tests.
+- Add customer update/delete and order status/cancellation endpoints **if required by the instructor**; the current API does not include them.
+- Add pagination and search/filter APIs and optimize N+1/fetch performance for large order listings.
+- Add simultaneous-order concurrency tests and improve fixture cleanup resilience in case of database failures.
+- Confirm a complete fresh-install procedure, including schema import, custom SQL features, definer permissions, application startup, and end-to-end endpoint tests. Test-database schema export and manual restore tests were completed, but this exact complete sequence has not yet been verified.
+- Confirm endpoint request/response bodies against the final checked-out Java code. Do not assume example IDs exist in every database.
 
-## Build and test
+## Build and run
 
 With MariaDB running, project-specific SQL objects created, and credentials configured:
 
 ```bash
 ./mvnw compile
+./mvnw clean test
 ./mvnw clean package
 ./mvnw spring-boot:run
 ```
 
-`clean package` runs configured Maven tests; a successful compile alone is not evidence that integration tests pass. Manual API checks and database rollback tests described above are supplementary evidence.
+`clean package` executes configured Maven tests unless skipped. The `test` profile is set on the Spring test classes; normal app startup continues to use the `webstore` database.
 
 ## Development notes
 
 - The API is a coursework prototype, not a security-hardened service.
-- Never commit `.env`, credentials, database dumps containing confidential data, or generated build artifacts.
+- Never commit `.env`, credentials, the course-populated `database/schema_populated_dump.sql`, temporary database exports, or generated build artifacts. Keep `compose.yaml` and `database/01_database_features.sql` in version control.
 - Retain the teacher-provided SQL schema as the baseline and keep custom database changes separate.
 - Use small, descriptive Git commits and update this README when behavior changes.

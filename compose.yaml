@@ -1,0 +1,36 @@
+
+services:
+  database:
+    image: mariadb:11.4
+    container_name: webstore-mariadb
+    restart: unless-stopped
+
+    environment:
+      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: webstore
+      MARIADB_USER: webstore_app
+      MARIADB_PASSWORD: ${DB_PASSWORD}
+
+    ports:
+      - "127.0.0.1:3307:3306"
+
+    volumes:
+      - webstore-data:/var/lib/mysql
+      - ./database/schema_populated_dump.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+    command:
+      - --event-scheduler=ON
+
+    healthcheck:
+      test:
+        - CMD
+        - healthcheck.sh
+        - --connect
+        - --innodb_initialized
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  webstore-data:

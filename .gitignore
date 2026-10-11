@@ -31,3 +31,8 @@ build/
 
 ### VS Code ###
 .vscode/
+
+.env.local
+.env
+webstore_test_schema.sql
+/database/schema_populated_dump.sql
