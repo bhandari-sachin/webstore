@@ -21,16 +21,14 @@ services:
     command:
       - --event-scheduler=ON
 
+
     healthcheck:
-      test:
-        - CMD
-        - healthcheck.sh
-        - --connect
-        - --innodb_initialized
+      test: [ "CMD", "healthcheck.sh", "--connect", "--innodb_initialized" ]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 30s
+
 
 volumes:
   webstore-data:
